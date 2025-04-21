@@ -4,3 +4,5 @@ pandas
 numpy
 leafmap
 st-gsheets-connection
+folium
+streamlit_folium 
