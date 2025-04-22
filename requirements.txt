@@ -6,3 +6,7 @@ leafmap
 st-gsheets-connection
 folium
 streamlit_folium 
+eatureGroup
+MarkerCluster
+GeoJson
+TopoJson
