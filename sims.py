@@ -386,7 +386,7 @@ def process_uploaded_file(uploaded_file):
 
 # Sidebar for app navigation and settings
 with st.sidebar:
-    st.image("https://i.imgur.com/KVOVDrY.png", width=250)  # Replace with a frequency management logo
+    st.image("komdigi.png", width=250)  # Replace with a frequency management logo
     
     st.markdown("### Menu Navigasi")
     app_mode = st.radio(
@@ -1368,7 +1368,7 @@ elif app_mode == "📊 Dashboard":
         
         # Show sample dashboard
         st.markdown("### 🖼️ Preview Dashboard")
-        st.image("https://i.imgur.com/LMPFZLK.png", caption="Contoh tampilan dashboard dengan data frekuensi")
+        st.image("komdigi.png", width=250, caption="Contoh tampilan dashboard dengan data frekuensi")
         
         # Quick instructions
         st.markdown("""
