@@ -16,7 +16,9 @@ from branca.element import Figure, MacroElement
 from jinja2 import Template
 import json
 from datetime import datetime
-
+import os
+import glob
+from pathlib import Path
 
 # Set page title and layout
 st.set_page_config(page_title="Sistem Informasi Manajemen Frekuensi", layout="wide", initial_sidebar_state="expanded")
@@ -59,6 +61,13 @@ st.markdown("""
         border-left: 4px solid #4CAF50;
         margin-bottom: 1rem;
     }
+    .error-box {
+        background-color: #FFEBEE;
+        padding: 1rem;
+        border-radius: 5px;
+        border-left: 4px solid #F44336;
+        margin-bottom: 1rem;
+    }
     .metric-card {
         background-color: white;
         padding: 1rem;
@@ -83,6 +92,30 @@ st.markdown("""
         padding: 1rem;
         background-color: #f8f9fa;
         border-radius: 5px;
+    }
+    .file-info {
+        background-color: #F3E5F5;
+        padding: 0.8rem;
+        border-radius: 5px;
+        border-left: 4px solid #9C27B0;
+        margin-bottom: 0.5rem;
+    }
+    .auto-load-info {
+        background-color: #E8F5E9;
+        padding: 1rem;
+        border-radius: 5px;
+        border-left: 4px solid #4CAF50;
+        margin-bottom: 1rem;
+    }
+    .filter-section {
+        background-color: #F5F5F5;
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+        border: 1px solid #E0E0E0;
+    }
+    .filter-row {
+        margin-bottom: 0.8rem;
     }
     /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
@@ -120,6 +153,106 @@ st.markdown("""
 # Header with custom styling
 st.markdown('<p class="main-header">📡 Sistem Informasi Manajemen Frekuensi</p>', unsafe_allow_html=True)
 st.markdown('<p style="text-align: center; font-size: 1.2rem;">Aplikasi untuk mengelola dan memvisualisasikan data frekuensi beserta lokasi pengguna</p>', unsafe_allow_html=True)
+
+# Function to create data directory if it doesn't exist
+def ensure_data_directory():
+    """Create data directory if it doesn't exist"""
+    data_dir = Path("data")
+    if not data_dir.exists():
+        data_dir.mkdir(exist_ok=True)
+    return data_dir
+
+# Function to scan and load CSV files from data directory
+@st.cache_data
+def scan_data_directory():
+    """Scan data directory for CSV files and return file information"""
+    data_dir = ensure_data_directory()
+    csv_files = list(data_dir.glob("*.csv"))
+    
+    file_info = []
+    for file_path in csv_files:
+        try:
+            # Get file stats
+            stat = file_path.stat()
+            size_mb = stat.st_size / (1024 * 1024)
+            modified_time = datetime.fromtimestamp(stat.st_mtime)
+            
+            # Try to read first few rows to get column info
+            try:
+                sample_df = pd.read_csv(file_path, nrows=5)
+                num_columns = len(sample_df.columns)
+                columns = list(sample_df.columns)
+            except Exception as e:
+                num_columns = "Error"
+                columns = []
+            
+            # Count total rows (approximate for large files)
+            try:
+                total_rows = sum(1 for line in open(file_path)) - 1  # -1 for header
+            except:
+                total_rows = "Unknown"
+            
+            file_info.append({
+                'filename': file_path.name,
+                'path': str(file_path),
+                'size_mb': size_mb,
+                'modified': modified_time,
+                'rows': total_rows,
+                'columns': num_columns,
+                'column_names': columns
+            })
+        except Exception as e:
+            st.error(f"Error reading file {file_path.name}: {str(e)}")
+    
+    return file_info
+
+# Function to load CSV file from data directory
+@st.cache_data
+def load_csv_from_data_dir(file_path):
+    """Load CSV file from data directory with error handling"""
+    try:
+        df = pd.read_csv(file_path)
+        return df, None
+    except Exception as e:
+        return None, str(e)
+
+# Function to auto-detect and load the best CSV file
+def auto_load_best_csv():
+    """Automatically load the most suitable CSV file from data directory"""
+    file_info = scan_data_directory()
+    
+    if not file_info:
+        return None, "Tidak ada file CSV ditemukan di folder 'data'"
+    
+    # Sort by modification time (most recent first) and then by completeness
+    def score_file(file):
+        score = 0
+        # More recent files get higher score
+        days_old = (datetime.now() - file['modified']).days
+        score += max(0, 100 - days_old)  # Recent files get up to 100 points
+        
+        # Files with more columns (likely more complete) get higher score
+        if isinstance(file['columns'], int):
+            score += file['columns'] * 2
+        
+        # Files with reasonable size get higher score
+        if isinstance(file['size_mb'], float):
+            if 0.1 < file['size_mb'] < 100:  # Sweet spot for CSV files
+                score += 50
+        
+        return score
+    
+    # Sort files by score
+    sorted_files = sorted(file_info, key=score_file, reverse=True)
+    best_file = sorted_files[0]
+    
+    # Load the best file
+    df, error = load_csv_from_data_dir(best_file['path'])
+    
+    if df is not None:
+        return df, f"Auto-loaded: {best_file['filename']}"
+    else:
+        return None, f"Error loading {best_file['filename']}: {error}"
 
 # Function to create custom icon based on service type
 def get_service_icon(service):
@@ -292,23 +425,25 @@ def optimize_map_data(df, max_markers, sampling_method="random"):
     
     elif sampling_method == "cluster":
         # K-means clustering to get representative points
-        # This is a simplified implementation - for real applications, 
-        # consider using scikit-learn for more advanced clustering
-        from sklearn.cluster import KMeans
-        
-        # Extract coordinates for clustering
-        coords = df[['SID_LAT', 'SID_LONG']].values
-        
-        # Determine number of clusters (max_markers or less)
-        n_clusters = min(max_markers, len(df))
-        
-        # Apply K-means clustering
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        df['cluster'] = kmeans.fit_predict(coords)
-        
-        # Select one representative point from each cluster
-        result = df.groupby('cluster').apply(lambda x: x.sample(1)).reset_index(drop=True)
-        return result
+        try:
+            from sklearn.cluster import KMeans
+            
+            # Extract coordinates for clustering
+            coords = df[['SID_LAT', 'SID_LONG']].values
+            
+            # Determine number of clusters (max_markers or less)
+            n_clusters = min(max_markers, len(df))
+            
+            # Apply K-means clustering
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            df['cluster'] = kmeans.fit_predict(coords)
+            
+            # Select one representative point from each cluster
+            result = df.groupby('cluster').apply(lambda x: x.sample(1)).reset_index(drop=True)
+            return result
+        except ImportError:
+            st.warning("scikit-learn tidak tersedia. Menggunakan random sampling.")
+            return df.sample(max_markers, random_state=42)
     
     elif sampling_method == "grid":
         # Grid-based sampling (divide area into grid cells and take samples from each)
@@ -333,9 +468,39 @@ def optimize_map_data(df, max_markers, sampling_method="random"):
         # Default to random sampling
         return df.sample(max_markers, random_state=42)
 
+# Function to apply filters to dataframe
+def apply_filters(df, city_filter, service_filter, client_filter=None, freq_range=None):
+    """Apply multiple filters to the dataframe"""
+    filtered_df = df.copy()
+    
+    # Apply city filter
+    if city_filter != "All":
+        filtered_df = filtered_df[filtered_df['CITY'] == city_filter]
+    
+    # Apply service filter
+    if service_filter != "All":
+        filtered_df = filtered_df[filtered_df['SERVICE'] == service_filter]
+    
+    # Apply client filter if provided
+    if client_filter and client_filter != "All":
+        filtered_df = filtered_df[filtered_df['CLNT_NAME'] == client_filter]
+    
+    # Apply frequency range filter if provided
+    if freq_range and 'FREQ_MHZ' in df.columns:
+        filtered_df = filtered_df[
+            (filtered_df['FREQ_MHZ'] >= freq_range[0]) & 
+            (filtered_df['FREQ_MHZ'] <= freq_range[1])
+        ]
+    
+    return filtered_df
+
 # Initialize session state for storing uploaded data
 if 'data' not in st.session_state:
     st.session_state.data = None
+if 'data_source' not in st.session_state:
+    st.session_state.data_source = None
+if 'available_files' not in st.session_state:
+    st.session_state.available_files = []
 
 # Initialize session state for file uploader
 if 'uploaded_file' not in st.session_state:
@@ -369,6 +534,7 @@ def process_uploaded_file(uploaded_file):
                 
             # Store the data in session state
             st.session_state.data = df
+            st.session_state.data_source = f"Manual Upload: {uploaded_file.name}"
             return True
         else:
             # If not valid, set error message
@@ -384,25 +550,109 @@ def process_uploaded_file(uploaded_file):
         st.session_state.upload_warnings = []
         return False
 
+# Function to process CSV file from data directory
+def process_csv_from_data_dir(file_path):
+    try:
+        # Read CSV into pandas DataFrame
+        df = pd.read_csv(file_path)
+        
+        # Validate the data
+        is_valid, message = validate_csv_data(df)
+        
+        if is_valid:
+            # Store the data in session state
+            st.session_state.data = df
+            st.session_state.data_source = f"Auto-loaded: {Path(file_path).name}"
+            
+            if isinstance(message, list):
+                st.session_state.upload_warnings = message
+                st.session_state.upload_message = f"Data berhasil dimuat dari folder data!"
+                st.session_state.upload_status = "success"
+            else:
+                st.session_state.upload_message = f"Data berhasil dimuat dari folder data!"
+                st.session_state.upload_status = "success"
+                st.session_state.upload_warnings = []
+            return True
+        else:
+            st.session_state.upload_message = f"Error validasi data: {message}"
+            st.session_state.upload_status = "error"
+            st.session_state.upload_warnings = []
+            return False
+            
+    except Exception as e:
+        st.session_state.upload_message = f"Error memproses file: {str(e)}"
+        st.session_state.upload_status = "error"
+        st.session_state.upload_warnings = []
+        return False
+
 # Sidebar for app navigation and settings
 with st.sidebar:
-    st.image("komdigi.png", width=250)  # Replace with a frequency management logo
+    st.image("https://via.placeholder.com/250x80/1E88E5/FFFFFF?text=SIMS", width=250)
     
     st.markdown("### Menu Navigasi")
     app_mode = st.radio(
         "Pilih Mode Aplikasi:",
-        ["📊 Dashboard", "🗂️ Upload & Analisis", "📝 Tentang Aplikasi"]
+        ["📊 Dashboard", "🗂️ Data Manager", "📁 File Browser", "📝 Tentang Aplikasi"]
     )
     
-    if app_mode == "📊 Dashboard":
-        st.info("Mode dashboard menampilkan visualisasi interaktif data frekuensi.")
+    # Auto-load section
+    st.markdown("---")
+    st.markdown("### 🤖 Auto-Load Data")
     
-    if app_mode == "🗂️ Upload & Analisis":
-        st.info("Upload data CSV untuk analisis dan visualisasi.")
+    # Scan for available files
+    file_info = scan_data_directory()
+    st.session_state.available_files = file_info
     
-    if app_mode == "📝 Tentang Aplikasi":
-        st.info("Informasi tentang aplikasi dan panduan penggunaan.")
+    if file_info:
+        st.success(f"Ditemukan {len(file_info)} file CSV di folder 'data'")
         
+        # Auto-load button
+        if st.button("🚀 Auto-Load Data Terbaik", help="Memuat file CSV terbaik secara otomatis"):
+            with st.spinner('Memuat data...'):
+                df, message = auto_load_best_csv()
+                if df is not None:
+                    st.session_state.data = df
+                    st.session_state.data_source = message
+                    st.session_state.upload_status = "success"
+                    st.session_state.upload_message = message
+                    st.session_state.upload_warnings = []
+                    st.success("Data berhasil dimuat!")
+                    st.rerun()
+                else:
+                    st.error(message)
+        
+        # Manual file selection
+        if len(file_info) > 1:
+            st.markdown("**Atau pilih file manual:**")
+            file_names = [f"{f['filename']} ({f['size_mb']:.1f}MB)" for f in file_info]
+            selected_idx = st.selectbox("Pilih file:", range(len(file_names)), format_func=lambda x: file_names[x])
+            
+            if st.button("📂 Load File Terpilih"):
+                selected_file = file_info[selected_idx]
+                with st.spinner(f'Memuat {selected_file["filename"]}...'):
+                    if process_csv_from_data_dir(selected_file['path']):
+                        st.success(f"Data dari {selected_file['filename']} berhasil dimuat!")
+                        st.rerun()
+    else:
+        st.info("Tidak ada file CSV di folder 'data'. Silakan upload manual atau tambahkan file ke folder 'data'.")
+    
+    # Current data info
+    if st.session_state.data is not None:
+        st.markdown("---")
+        st.markdown("### 📈 Data Saat Ini")
+        st.markdown(f"**Sumber:** {st.session_state.data_source}")
+        st.markdown(f"**Jumlah Baris:** {len(st.session_state.data):,}")
+        
+        # Clear data button
+        if st.button("🗑️ Hapus Data", help="Hapus data yang sedang dimuat"):
+            st.session_state.data = None
+            st.session_state.data_source = None
+            st.session_state.upload_status = None
+            st.session_state.upload_message = ""
+            st.session_state.upload_warnings = []
+            st.success("Data berhasil dihapus!")
+            st.rerun()
+    
     st.markdown("---")
     
     # Advanced Settings
@@ -417,8 +667,7 @@ with st.sidebar:
     
     # Performance Settings
     st.markdown("#### Pengaturan Performa")
-    # Increase max_markers to 20000 to handle larger datasets
-    max_markers = st.slider("Jumlah maksimum marker pada peta:", 1000, 20000, 5000, 1000)
+    max_markers = st.slider("Jumlah maksimum marker pada peta:", 1000, 20000, 10000, 1000)
     
     sampling_method = st.selectbox(
         "Metode sampling untuk dataset besar:",
@@ -432,562 +681,304 @@ with st.sidebar:
     
     # Date and version info
     st.markdown("---")
-    st.markdown(f"<div style='text-align: center; color: #888;'>Versi 2.2.0<br>Last updated: {datetime.now().strftime('%d %b %Y')}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align: center; color: #888;'>Versi 3.1.0<br>Last updated: {datetime.now().strftime('%d %b %Y')}</div>", unsafe_allow_html=True)
 
 # Main content area based on selected mode
-if app_mode == "🗂️ Upload & Analisis":
-    # Upload and Analysis page
-    st.markdown('<p class="sub-header">📤 Upload Data Frekuensi</p>', unsafe_allow_html=True)
+if app_mode == "📁 File Browser":
+    # File Browser page
+    st.markdown('<p class="sub-header">📁 File Browser - Data Directory</p>', unsafe_allow_html=True)
     
-    # Upload container with styling
-    st.markdown('<div class="upload-container">', unsafe_allow_html=True)
+    # Refresh button
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("🔄 Refresh"):
+            st.cache_data.clear()
+            st.rerun()
     
-    # File uploader
-    uploaded_file = st.file_uploader("Pilih file CSV untuk diunggah", type=["csv"])
+    # Display available files
+    file_info = st.session_state.available_files
     
-    if uploaded_file is not None and uploaded_file != st.session_state.uploaded_file:
-        st.session_state.uploaded_file = uploaded_file
-        with st.spinner('Memproses file...'):
-            process_uploaded_file(uploaded_file)
-    
-    # Display upload status messages
-    if st.session_state.upload_status == "success":
-        st.success(st.session_state.upload_message)
+    if file_info:
+        st.markdown(f"### 📂 Ditemukan {len(file_info)} file CSV di folder 'data'")
         
-        # Display warnings if any
-        if st.session_state.upload_warnings:
-            for warning in st.session_state.upload_warnings:
-                st.warning(warning)
+        for i, file in enumerate(file_info):
+            with st.expander(f"📄 {file['filename']} ({file['size_mb']:.1f} MB)"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("**Informasi File:**")
+                    st.write(f"📅 **Dimodifikasi:** {file['modified'].strftime('%d %b %Y, %H:%M')}")
+                    st.write(f"📊 **Jumlah Baris:** {file['rows']:,}" if isinstance(file['rows'], int) else f"📊 **Jumlah Baris:** {file['rows']}")
+                    st.write(f"📋 **Jumlah Kolom:** {file['columns']}" if isinstance(file['columns'], int) else f"📋 **Jumlah Kolom:** {file['columns']}")
+                
+                with col2:
+                    if file['column_names']:
+                        st.markdown("**Kolom yang Tersedia:**")
+                        for col in file['column_names'][:10]:  # Show first 10 columns
+                            st.write(f"• {col}")
+                        if len(file['column_names']) > 10:
+                            st.write(f"• ... dan {len(file['column_names']) - 10} kolom lainnya")
+                
+                # Action buttons
+                btn_col1, btn_col2, btn_col3 = st.columns(3)
+                
+                with btn_col1:
+                    if st.button(f"📖 Preview", key=f"preview_{i}"):
+                        try:
+                            preview_df = pd.read_csv(file['path'], nrows=10)
+                            st.markdown("**Preview 10 baris pertama:**")
+                            st.dataframe(preview_df, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"Error preview: {str(e)}")
+                
+                with btn_col2:
+                    if st.button(f"📊 Load Data", key=f"load_{i}"):
+                        with st.spinner(f'Memuat {file["filename"]}...'):
+                            if process_csv_from_data_dir(file['path']):
+                                st.success(f"Data dari {file['filename']} berhasil dimuat!")
+                                st.rerun()
+                            else:
+                                st.error("Gagal memuat data")
+                
+                with btn_col3:
+                    # Download button
+                    with open(file['path'], 'rb') as f:
+                        st.download_button(
+                            label="💾 Download",
+                            data=f.read(),
+                            file_name=file['filename'],
+                            mime='text/csv',
+                            key=f"download_{i}"
+                        )
+    else:
+        st.markdown("""
+        <div class="warning-box">
+            <h3>Folder 'data' Kosong</h3>
+            <p>Tidak ada file CSV yang ditemukan di folder 'data'.</p>
+            <p>Untuk menggunakan fitur auto-load:</p>
+            <ol>
+                <li>Buat folder bernama 'data' di direktori aplikasi</li>
+                <li>Letakkan file CSV Anda di dalam folder tersebut</li>
+                <li>Klik tombol 'Refresh' di atas</li>
+            </ol>
+        </div>
+        """, unsafe_allow_html=True)
         
-        # Display data summary
+        # Instructions for creating data folder
+        st.markdown("### 📋 Panduan Setup Folder Data")
+        st.code("""
+# Struktur folder yang direkomendasikan:
+your_app_directory/
+├── app.py (file aplikasi utama)
+├── data/
+│   ├── frequency_data_2024.csv
+│   ├── frequency_data_2025.csv
+│   └── backup_data.csv
+└── komdigi.png (logo)
+        """)
+
+elif app_mode == "🗂️ Data Manager":
+    # Data Manager page - combines upload and data management
+    st.markdown('<p class="sub-header">🗂️ Data Manager</p>', unsafe_allow_html=True)
+    
+    # Create tabs for different data management functions
+    data_tab1, data_tab2, data_tab3 = st.tabs(["📤 Upload Manual", "📁 Auto-Load Status", "🔍 Data Analysis"])
+    
+    with data_tab1:
+        st.markdown("### 📤 Upload Data Manual")
+        
+        # Upload container with styling
+        st.markdown('<div class="upload-container">', unsafe_allow_html=True)
+        
+        # File uploader
+        uploaded_file = st.file_uploader("Pilih file CSV untuk diunggah", type=["csv"])
+        
+        if uploaded_file is not None and uploaded_file != st.session_state.uploaded_file:
+            st.session_state.uploaded_file = uploaded_file
+            with st.spinner('Memproses file...'):
+                process_uploaded_file(uploaded_file)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Display upload status messages
+        if st.session_state.upload_status == "success":
+            st.success(st.session_state.upload_message)
+            
+            # Display warnings if any
+            if st.session_state.upload_warnings:
+                for warning in st.session_state.upload_warnings:
+                    st.warning(warning)
+        
+        elif st.session_state.upload_status == "error":
+            st.error(st.session_state.upload_message)
+        
+        # Instructions
+        with st.expander("📋 Panduan Upload Data"):
+            st.markdown("""
+            #### Format Data yang Diperlukan
+            
+            **Kolom Wajib:**
+            - `CITY` - Kota lokasi pemancar
+            - `CLNT_NAME` - Nama klien/pengguna frekuensi
+            - `STN_NAME` - Nama stasiun/pemancar
+            - `SERVICE` - Kategori layanan (Broadcasting, Mobile, Satellite, dll)
+            - `SUBSERVICE` - Sub kategori layanan (FM Radio, 4G LTE, 5G, dll)
+            - `SID_LONG` - Koordinat longitude (bujur) lokasi
+            - `SID_LAT` - Koordinat latitude (lintang) lokasi
+            
+            **Kolom Opsional:**
+            - `FREQ_MHZ` - Frekuensi dalam MHz
+            - `BW_MHZ` - Bandwidth dalam MHz
+            - `DATE` - Tanggal registrasi/pembaruan data
+            - `TX_POWER` - Daya pancar dalam Watt
+            - `ANTENNA_HEIGHT` - Tinggi antena dalam meter
+            - `POLARIZATION` - Polarisasi antena
+            """)
+    
+    with data_tab2:
+        st.markdown("### 📁 Status Auto-Load")
+        
         if st.session_state.data is not None:
-            df = st.session_state.data
+            st.markdown(f"""
+            <div class="auto-load-info">
+                <h4>✅ Data Aktif</h4>
+                <p><strong>Sumber:</strong> {st.session_state.data_source}</p>
+                <p><strong>Jumlah Baris:</strong> {len(st.session_state.data):,}</p>
+                <p><strong>Jumlah Kolom:</strong> {len(st.session_state.data.columns)}</p>
+            </div>
+            """, unsafe_allow_html=True)
             
-            # Data summary container
-            st.markdown("### 📊 Ringkasan Data")
+            # Show data preview
+            st.markdown("#### Preview Data")
+            st.dataframe(st.session_state.data.head(), use_container_width=True)
             
-            # Display metrics in columns
+            # Data info
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Jumlah Baris", f"{len(df):,}")
+                st.metric("Total Baris", f"{len(st.session_state.data):,}")
             with col2:
-                st.metric("Jumlah Kota", f"{df['CITY'].nunique():,}")
+                st.metric("Kota Unik", f"{st.session_state.data['CITY'].nunique():,}")
             with col3:
-                st.metric("Jumlah Klien", f"{df['CLNT_NAME'].nunique():,}")
+                st.metric("Klien Unik", f"{st.session_state.data['CLNT_NAME'].nunique():,}")
             with col4:
-                st.metric("Jumlah Layanan", f"{df['SERVICE'].nunique():,}")
+                st.metric("Layanan Unik", f"{st.session_state.data['SERVICE'].nunique():,}")
+        
+        else:
+            st.markdown("""
+            <div class="warning-box">
+                <h4>⚠️ Tidak Ada Data Aktif</h4>
+                <p>Belum ada data yang dimuat. Gunakan salah satu metode berikut:</p>
+                <ul>
+                    <li>Upload file manual di tab "Upload Manual"</li>
+                    <li>Gunakan tombol "Auto-Load" di sidebar</li>
+                    <li>Pilih file dari "File Browser"</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Available files in data directory
+        st.markdown("#### 📂 File Tersedia di Folder Data")
+        
+        if st.session_state.available_files:
+            for file in st.session_state.available_files:
+                st.markdown(f"""
+                <div class="file-info">
+                    <strong>{file['filename']}</strong> ({file['size_mb']:.1f} MB)<br>
+                    <small>📅 {file['modified'].strftime('%d %b %Y, %H:%M')} | 📊 {file['rows']} baris | 📋 {file['columns']} kolom</small>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("Tidak ada file CSV di folder 'data'")
+    
+    with data_tab3:
+        if st.session_state.data is not None:
+            st.markdown("### 🔍 Analisis Data")
             
-            # Display preview of the data
-            st.markdown("### 🔍 Preview Data")
-            st.dataframe(df.head(10), use_container_width=True)
+            df = st.session_state.data
             
-            # Data filtering options
-            st.markdown('<p class="sub-header">🔍 Filter Data</p>', unsafe_allow_html=True)
+            # Data quality analysis
+            st.markdown("#### 📊 Kualitas Data")
             
-            # Filter container
-            st.markdown('<div class="filter-container">', unsafe_allow_html=True)
+            qual_col1, qual_col2 = st.columns(2)
             
-            # Filter columns
-            filter_col1, filter_col2, filter_col3 = st.columns(3)
+            with qual_col1:
+                # Missing data analysis
+                missing_data = df.isnull().sum()
+                missing_pct = (missing_data / len(df)) * 100
+                
+                missing_df = pd.DataFrame({
+                    'Kolom': missing_data.index,
+                    'Missing Count': missing_data.values,
+                    'Missing %': missing_pct.values
+                }).sort_values('Missing %', ascending=False)
+                
+                st.markdown("**Data yang Hilang:**")
+                st.dataframe(missing_df, use_container_width=True)
             
-            with filter_col1:
-                # Filter by city
-                cities = ["All"] + sorted(df['CITY'].unique().tolist())
-                selected_city = st.selectbox("Filter berdasarkan Kota:", cities)
+            with qual_col2:
+                # Data types
+                dtype_df = pd.DataFrame({
+                    'Kolom': df.dtypes.index,
+                    'Tipe Data': df.dtypes.values.astype(str)
+                })
+                
+                st.markdown("**Tipe Data:**")
+                st.dataframe(dtype_df, use_container_width=True)
             
-            with filter_col2:
-                # Filter by service
-                services = ["All"] + sorted(df['SERVICE'].unique().tolist())
-                selected_service = st.selectbox("Filter berdasarkan Layanan:", services)
+            # Coordinate validation
+            st.markdown("#### 🗺️ Validasi Koordinat")
             
-            with filter_col3:
-                # Filter by client
-                clients = ["All"] + sorted(df['CLNT_NAME'].unique().tolist())
-                selected_client = st.selectbox("Filter berdasarkan Klien:", clients)
+            coord_issues = []
             
-            # Additional filters if frequency data exists
+            # Check for invalid coordinates
+            invalid_lat = df[(df['SID_LAT'] < -90) | (df['SID_LAT'] > 90)]
+            invalid_long = df[(df['SID_LONG'] < -180) | (df['SID_LONG'] > 180)]
+            
+            if not invalid_lat.empty:
+                coord_issues.append(f"⚠️ {len(invalid_lat)} baris dengan latitude tidak valid")
+            
+            if not invalid_long.empty:
+                coord_issues.append(f"⚠️ {len(invalid_long)} baris dengan longitude tidak valid")
+            
+            # Check for suspicious coordinates (e.g., 0,0)
+            suspicious_coords = df[(df['SID_LAT'] == 0) & (df['SID_LONG'] == 0)]
+            if not suspicious_coords.empty:
+                coord_issues.append(f"⚠️ {len(suspicious_coords)} baris dengan koordinat (0,0) - mungkin data kosong")
+            
+            # Check coordinate precision
+            lat_precision = df['SID_LAT'].apply(lambda x: len(str(x).split('.')[-1]) if '.' in str(x) else 0)
+            long_precision = df['SID_LONG'].apply(lambda x: len(str(x).split('.')[-1]) if '.' in str(x) else 0)
+            
+            if lat_precision.mean() < 4 or long_precision.mean() < 4:
+                coord_issues.append("⚠️ Presisi koordinat rendah (kurang dari 4 digit desimal)")
+            
+            if coord_issues:
+                for issue in coord_issues:
+                    st.warning(issue)
+            else:
+                st.success("✅ Semua koordinat valid")
+            
+            # Frequency analysis (if available)
             if 'FREQ_MHZ' in df.columns:
+                st.markdown("#### 📡 Analisis Frekuensi")
+                
                 freq_col1, freq_col2 = st.columns(2)
                 
                 with freq_col1:
-                    # Frequency range filter
-                    min_freq = float(df['FREQ_MHZ'].min())
-                    max_freq = float(df['FREQ_MHZ'].max())
-                    freq_range = st.slider(
-                        "Rentang Frekuensi (MHz):",
-                        min_value=min_freq,
-                        max_value=max_freq,
-                        value=(min_freq, max_freq)
-                    )
+                    freq_stats = df['FREQ_MHZ'].describe()
+                    st.markdown("**Statistik Frekuensi:**")
+                    st.dataframe(freq_stats, use_container_width=True)
                 
                 with freq_col2:
-                    # Frequency band filter
-                    bands = ["All"] + sorted(df['FREQ_MHZ'].apply(get_frequency_band).unique().tolist())
-                    selected_band = st.selectbox("Filter berdasarkan Band:", bands)
-            
-            # Apply filters to create filtered dataframe
-            filtered_df = df.copy()
-            
-            # Apply city filter
-            if selected_city != "All":
-                filtered_df = filtered_df[filtered_df['CITY'] == selected_city]
-            
-            # Apply service filter
-            if selected_service != "All":
-                filtered_df = filtered_df[filtered_df['SERVICE'] == selected_service]
-            
-            # Apply client filter
-            if selected_client != "All":
-                filtered_df = filtered_df[filtered_df['CLNT_NAME'] == selected_client]
-            
-            # Apply frequency filter if exists
-            if 'FREQ_MHZ' in df.columns:
-                # Apply frequency range filter
-                filtered_df = filtered_df[
-                    (filtered_df['FREQ_MHZ'] >= freq_range[0]) & 
-                    (filtered_df['FREQ_MHZ'] <= freq_range[1])
-                ]
-                
-                # Apply band filter
-                if selected_band != "All":
-                    filtered_df = filtered_df[filtered_df['FREQ_MHZ'].apply(get_frequency_band) == selected_band]
-            
-            st.markdown('</div>', unsafe_allow_html=True)  # Close filter container
-            
-            # Show filtered data info
-            st.markdown(f"<div class='info-box'>Menampilkan {len(filtered_df):,} dari {len(df):,} data ({(len(filtered_df)/len(df)*100):.1f}%)</div>", unsafe_allow_html=True)
-            
-            # Export options
-            export_col1, export_col2 = st.columns(2)
-            
-            with export_col1:
-                # Create download button for filtered CSV
-                csv = filtered_df.to_csv(index=False)
-                b64 = base64.b64encode(csv.encode()).decode()
-                href = f'<a href="data:file/csv;base64,{b64}" download="filtered_frequency_data.csv" class="btn" style="background-color:#1E88E5; color:white; padding:0.5rem 1rem; border-radius:5px; text-decoration:none; display:inline-block; text-align:center;">📥 Download Data Terfilter (CSV)</a>'
-                st.markdown(href, unsafe_allow_html=True)
-            
-            with export_col2:
-                # Show filtered data
-                if st.button("Tampilkan Data Terfilter", key="show_filtered"):
-                    st.dataframe(filtered_df, use_container_width=True)
-            
-            # Data Visualization Section
-            st.markdown('<p class="sub-header">📊 Visualisasi Data</p>', unsafe_allow_html=True)
-            
-            # Visualization Tabs
-            viz_tab1, viz_tab2, viz_tab3 = st.tabs(["📍 Visualisasi Peta", "📊 Grafik Distribusi", "📈 Analisis Frekuensi"])
-            
-            with viz_tab1:
-                st.markdown("### 🗺️ Peta Sebaran Lokasi Frekuensi")
-                
-                # Map settings
-                map_col1, map_col2 = st.columns(2)
-                
-                with map_col1:
-                    # Map type selection
-                    map_type = st.selectbox(
-                        "Pilih Jenis Peta:",
-                        ["OpenStreetMap", "Esri Satellite", "CartoDB Dark", "Stamen Terrain"]
-                    )
-                
-                with map_col2:
-                    # Display mode
-                    display_mode = st.selectbox(
-                        "Mode Tampilan:",
-                        ["Markers", "Heatmap", "Markers + Heatmap"]
-                    )
-                
-                # Create map
-                if len(filtered_df) > 0:
-                    # Optimize data if needed based on performance settings
-                    if len(filtered_df) > max_markers:
-                        map_data = optimize_map_data(filtered_df, max_markers, sampling_method)
-                        st.warning(f"Dataset terfilter terlalu besar ({len(filtered_df):,} baris). Menampilkan sampel {len(map_data):,} titik untuk performa yang lebih baik.")
-                    else:
-                        map_data = filtered_df
+                    # Frequency bands distribution
+                    df['FREQ_BAND'] = df['FREQ_MHZ'].apply(get_frequency_band)
+                    band_counts = df['FREQ_BAND'].value_counts()
                     
-                    # Define map center (average of coordinates)
-                    avg_lat = map_data['SID_LAT'].mean()
-                    avg_long = map_data['SID_LONG'].mean()
-                    
-                    # Create base map
-                    if map_type == "OpenStreetMap":
-                        m = folium.Map(location=[avg_lat, avg_long], zoom_start=6, tiles="OpenStreetMap")
-                    elif map_type == "Esri Satellite":
-                        m = folium.Map(location=[avg_lat, avg_long], zoom_start=6, tiles="Esri Satellite")
-                    elif map_type == "CartoDB Dark":
-                        m = folium.Map(location=[avg_lat, avg_long], zoom_start=6, tiles="CartoDB dark_matter")
-                    elif map_type == "Stamen Terrain":
-                        m = folium.Map(location=[avg_lat, avg_long], zoom_start=6, tiles="Stamen Terrain")
-                    
-                    # Add plugins
-                    MiniMap().add_to(m)
-                    Draw(export=True).add_to(m)
-                    LocateControl().add_to(m)
-                    Fullscreen().add_to(m)
-                    MousePosition().add_to(m)
-                    
-                    # Add search plugin
-                    # Search(
-                    #    layer=None,
-                    #    geom_type="Point",
-                    #    placeholder="Search location...",
-                    #    collapsed=True,
-                    #    search_zoom=12
-                    # ).add_to(m)
-                    
-                    # Tambahkan ini sebagai pengganti plugin Search
-                    search_query = st.text_input("Cari lokasi:", "")
-                    if search_query:
-                        st.write(f"Mencari: {search_query}")
-                        # Tampilkan filter data berdasarkan pencarian
-                        filtered_results = df[df['CITY'].str.contains(search_query, case=False) | 
-                        df['STN_NAME'].str.contains(search_query, case=False)]
-                        if not filtered_results.empty:
-                            st.dataframe(filtered_results)
-                        else:
-                            st.info("Tidak ditemukan hasil yang cocok")
-                    
-                    
-                    # Create marker cluster for markers
-                    if display_mode in ["Markers", "Markers + Heatmap"]:
-                        marker_cluster = MarkerCluster().add_to(m)
-                        
-                        # Add markers with popups
-                        for _, row in map_data.iterrows():
-                            service_info = get_service_icon(row['SERVICE'])
-                            icon_color = service_info['color']
-                            
-                            # Create custom icon
-                            icon = folium.Icon(
-                                icon=service_info['icon'],
-                                prefix='fa',
-                                color='white',
-                                icon_color=icon_color
-                            )
-                            
-                            # Create popup
-                            popup_content = create_popup_content(row)
-                            popup = folium.Popup(folium.Html(popup_content, script=True), max_width=350)
-                            
-                            # Add marker to cluster
-                            folium.Marker(
-                                location=[row['SID_LAT'], row['SID_LONG']],
-                                popup=popup,
-                                icon=icon,
-                                tooltip=f"{row['STN_NAME']} - {row['SERVICE']}"
-                            ).add_to(marker_cluster)
-                    
-                    # Add heatmap
-                    if display_mode in ["Heatmap", "Markers + Heatmap"]:
-                        # Extract coordinates for heatmap
-                        heat_data = [[row['SID_LAT'], row['SID_LONG']] for _, row in map_data.iterrows()]
-                        
-                        # Add heat map to the map
-                        HeatMap(heat_data, radius=15, blur=10, gradient={0.4: 'blue', 0.65: 'lime', 0.8: 'yellow', 1: 'red'}).add_to(m)
-                    
-                    # Add legend
-                    legend_html = """
-                    <div style="position: fixed; bottom: 50px; right: 50px; z-index: 1000; background-color: white; 
-                                padding: 10px; border: 2px solid grey; border-radius: 5px;">
-                        <p style="text-align: center; font-weight: bold; margin-bottom: 10px;">Legenda Layanan</p>
-                    """
-                    
-                    # Add legend items based on unique services in the filtered_df
-                    for service in sorted(map_data['SERVICE'].unique()):
-                        service_info = get_service_icon(service)
-                        legend_html += f"""
-                        <div class="legend-item">
-                            <div class="legend-color" style="background-color: {service_info['color']};"></div>
-                            <div>{service}</div>
-                        </div>
-                        """
-                    
-                    legend_html += """
-                    </div>
-                    """
-                    
-                    # Add legend as HTML
-                    m.get_root().html.add_child(folium.Element(legend_html))
-                    
-                    # Display map
-                    st.markdown("#### Interactive Map")
-                    folium_static(m, width=1000, height=600)
-                    
-                    # Show stats about the map
-                    st.markdown(f"<div class='info-box'>Menampilkan {len(map_data):,} titik lokasi dari {len(filtered_df):,} data terfilter.</div>", unsafe_allow_html=True)
-                else:
-                    st.warning("Tidak ada data untuk ditampilkan. Silakan sesuaikan filter.")
-            
-            with viz_tab2:
-                st.markdown("### 📊 Grafik Distribusi")
-                
-                if len(filtered_df) > 0:
-                    # Create distribution charts
-                    dist_tab1, dist_tab2, dist_tab3 = st.tabs(["Distribusi Layanan", "Distribusi Kota", "Distribusi Klien"])
-                    
-                    with dist_tab1:
-                        # Service distribution
-                        service_counts = filtered_df['SERVICE'].value_counts().reset_index()
-                        service_counts.columns = ['SERVICE', 'COUNT']
-                        
-                        # Create bar chart
-                        fig = px.bar(
-                            service_counts, 
-                            x='SERVICE', 
-                            y='COUNT',
-                            color='SERVICE',
-                            title='Distribusi Layanan',
-                            labels={'SERVICE': 'Jenis Layanan', 'COUNT': 'Jumlah'},
-                            color_discrete_sequence=px.colors.qualitative.Bold
-                        )
-                        
-                        # Update layout
-                        fig.update_layout(xaxis_title='Jenis Layanan', yaxis_title='Jumlah')
-                        
-                        # Show plot
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Show percentages as pie chart
-                        pie_fig = px.pie(
-                            service_counts, 
-                            values='COUNT', 
-                            names='SERVICE', 
-                            title='Persentase Jenis Layanan',
-                            color_discrete_sequence=px.colors.qualitative.Bold
-                        )
-                        
-                        # Update layout
-                        pie_fig.update_layout(margin=dict(t=40, b=40, l=40, r=40))
-                        pie_fig.update_traces(textposition='inside', textinfo='percent+label', textfont_size=12)
-                        
-                        # Show plot
-                        st.plotly_chart(pie_fig, use_container_width=True)
-                    
-                    with dist_tab2:
-                        # City distribution (top 15)
-                        city_counts = filtered_df['CITY'].value_counts().reset_index()
-                        city_counts.columns = ['CITY', 'COUNT']
-                        
-                        # Limit to top 15 cities for readability
-                        if len(city_counts) > 15:
-                            city_counts = city_counts.head(15)
-                            title = 'Distribusi Kota (Top 15)'
-                        else:
-                            title = 'Distribusi Kota'
-                        
-                        # Create horizontal bar chart
-                        fig = px.bar(
-                            city_counts, 
-                            y='CITY', 
-                            x='COUNT',
-                            color='COUNT',
-                            title=title,
-                            labels={'CITY': 'Kota', 'COUNT': 'Jumlah'},
-                            orientation='h',
-                            color_continuous_scale='Blues'
-                        )
-                        
-                        # Update layout
-                        fig.update_layout(yaxis_title='Kota', xaxis_title='Jumlah', yaxis={'categoryorder':'total ascending'})
-                        
-                        # Show plot
-                        st.plotly_chart(fig, use_container_width=True)
-                    
-                    with dist_tab3:
-                        # Client distribution (top 15)
-                        client_counts = filtered_df['CLNT_NAME'].value_counts().reset_index()
-                        client_counts.columns = ['CLNT_NAME', 'COUNT']
-                        
-                        # Limit to top 15 clients for readability
-                        if len(client_counts) > 15:
-                            client_counts = client_counts.head(15)
-                            title = 'Distribusi Klien (Top 15)'
-                        else:
-                            title = 'Distribusi Klien'
-                        
-                        # Create horizontal bar chart
-                        fig = px.bar(
-                            client_counts, 
-                            y='CLNT_NAME', 
-                            x='COUNT',
-                            color='COUNT',
-                            title=title,
-                            labels={'CLNT_NAME': 'Klien', 'COUNT': 'Jumlah'},
-                            orientation='h',
-                            color_continuous_scale='Greens'
-                        )
-                        
-                        # Update layout
-                        fig.update_layout(yaxis_title='Klien', xaxis_title='Jumlah', yaxis={'categoryorder':'total ascending'})
-                        
-                        # Show plot
-                        st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("Tidak ada data untuk ditampilkan. Silakan sesuaikan filter.")
-            
-            with viz_tab3:
-                st.markdown("### 📈 Analisis Frekuensi")
-                
-                if 'FREQ_MHZ' in filtered_df.columns and len(filtered_df) > 0:
-                    # Frequency analysis
-                    freq_tab1, freq_tab2, freq_tab3 = st.tabs(["Distribusi Frekuensi", "Frekuensi per Layanan", "Visualisasi 3D"])
-                    
-                    with freq_tab1:
-                        # Create histogram of frequencies
-                        fig = px.histogram(
-                            filtered_df,
-                            x='FREQ_MHZ',
-                            nbins=50,
-                            title='Distribusi Frekuensi',
-                            labels={'FREQ_MHZ': 'Frekuensi (MHz)'},
-                            color_discrete_sequence=['#1E88E5']
-                        )
-                        
-                        # Update layout
-                        fig.update_layout(xaxis_title='Frekuensi (MHz)', yaxis_title='Jumlah')
-                        
-                        # Show plot
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Add band distribution
-                        filtered_df['FREQ_BAND'] = filtered_df['FREQ_MHZ'].apply(get_frequency_band)
-                        band_counts = filtered_df['FREQ_BAND'].value_counts().reset_index()
-                        band_counts.columns = ['FREQ_BAND', 'COUNT']
-                        
-                        # Create band distribution chart
-                        band_fig = px.bar(
-                            band_counts,
-                            x='FREQ_BAND',
-                            y='COUNT',
-                            color='FREQ_BAND',
-                            title='Distribusi Band Frekuensi',
-                            labels={'FREQ_BAND': 'Band Frekuensi', 'COUNT': 'Jumlah'}
-                        )
-                        
-                        # Update layout
-                        band_fig.update_layout(xaxis_title='Band Frekuensi', yaxis_title='Jumlah')
-                        
-                        # Show plot
-                        st.plotly_chart(band_fig, use_container_width=True)
-                    
-                    with freq_tab2:
-                        # Box plot of frequency by service
-                        fig = px.box(
-                            filtered_df,
-                            x='SERVICE',
-                            y='FREQ_MHZ',
-                            color='SERVICE',
-                            title='Distribusi Frekuensi per Layanan',
-                            labels={'SERVICE': 'Jenis Layanan', 'FREQ_MHZ': 'Frekuensi (MHz)'}
-                        )
-                        
-                        # Update layout
-                        fig.update_layout(xaxis_title='Jenis Layanan', yaxis_title='Frekuensi (MHz)')
-                        
-                        # Show plot
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Calculate average frequency per service
-                        avg_freq = filtered_df.groupby('SERVICE')['FREQ_MHZ'].mean().reset_index()
-                        avg_freq.columns = ['SERVICE', 'AVG_FREQ']
-                        avg_freq = avg_freq.sort_values('AVG_FREQ')
-                        
-                        # Create bar chart of average frequencies
-                        avg_fig = px.bar(
-                            avg_freq,
-                            y='SERVICE',
-                            x='AVG_FREQ',
-                            color='SERVICE',
-                            title='Rata-rata Frekuensi per Layanan',
-                            labels={'SERVICE': 'Jenis Layanan', 'AVG_FREQ': 'Rata-rata Frekuensi (MHz)'},
-                            orientation='h'
-                        )
-                        
-                        # Update layout
-                        avg_fig.update_layout(yaxis_title='Jenis Layanan', xaxis_title='Rata-rata Frekuensi (MHz)')
-                        
-                        # Show plot
-                        st.plotly_chart(avg_fig, use_container_width=True)
-                    
-                    with freq_tab3:
-                        # 3D scatter plot of locations and frequencies
-                        fig = px.scatter_3d(
-                            filtered_df,
-                            x='SID_LONG',
-                            y='SID_LAT',
-                            z='FREQ_MHZ',
-                            color='SERVICE',
-                            title='Visualisasi 3D Lokasi dan Frekuensi',
-                            labels={
-                                'SID_LONG': 'Longitude',
-                                'SID_LAT': 'Latitude',
-                                'FREQ_MHZ': 'Frekuensi (MHz)',
-                                'SERVICE': 'Jenis Layanan'
-                            }
-                        )
-                        
-                        # Update layout
-                        fig.update_layout(margin=dict(l=0, r=0, b=0, t=30))
-                        
-                        # Show plot
-                        st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("Data frekuensi tidak tersedia atau tidak ada data untuk ditampilkan. Silakan sesuaikan filter.")
-    else:
-        # Display guide on how to upload
-        st.info("Belum ada data yang diunggah. Silakan unggah file CSV dengan data frekuensi.")
-        
-        # Instructions
-        st.markdown("""
-        #### Panduan Upload Data
-        
-        1. Siapkan file CSV dengan kolom-kolom yang diperlukan:
-           - `CITY` - Kota lokasi pemancar
-           - `CLNT_NAME` - Nama klien/pengguna frekuensi
-           - `STN_NAME` - Nama stasiun/pemancar
-           - `SERVICE` - Kategori layanan (Broadcasting, Mobile, Satellite, dll)
-           - `SUBSERVICE` - Sub kategori layanan (FM Radio, 4G LTE, 5G, dll)
-           - `SID_LONG` - Koordinat longitude (bujur) lokasi
-           - `SID_LAT` - Koordinat latitude (lintang) lokasi
-           
-        2. Kolom opsional yang dapat ditambahkan:
-           - `FREQ_MHZ` - Frekuensi dalam MHz
-           - `BW_MHZ` - Bandwidth dalam MHz
-           - `DATE` - Tanggal registrasi/pembaruan data
-           - `TX_POWER` - Daya pancar dalam Watt
-           - `ANTENNA_HEIGHT` - Tinggi antena dalam meter
-           - `POLARIZATION` - Polarisasi antena
-           
-        3. Klik tombol "Browse files" di atas untuk memilih file CSV dari perangkat Anda.
-        
-        4. Setelah file diunggah, sistem akan melakukan validasi dan menampilkan data jika valid.
-        """)
-        
-        # Sample CSV template
-        st.markdown("#### Contoh Template CSV")
-        
-        sample_csv = """CITY,CLNT_NAME,STN_NAME,SERVICE,SUBSERVICE,SID_LAT,SID_LONG,FREQ_MHZ,BW_MHZ
-Jakarta,PT Telkom,Jakarta Tower,Broadcasting,FM Radio,-6.2088,106.8456,98.5,0.2
-Surabaya,PT Media Networks,Surabaya Station,Mobile,4G LTE,-7.2575,112.7520,1800.0,20.0
-Bandung,PT Broadcast Indonesia,Bandung Relay,Cellular,5G,-6.9175,107.6191,2600.0,40.0
-Medan,PT Radio Sentosa,Medan Transmitter,Broadcasting,TV,3.5952,98.6722,205.0,0.1
-Makassar,PT Telkom,Makassar Tower,Satellite,Internet,-5.1477,119.4144,14000.0,36.0
-Semarang,PT Radio Indonesia,Semarang Station,Radio,AM Radio,-6.9932,110.4203,540.0,0.01"""
-        
-        st.code(sample_csv, language="csv")
-        
-        # Download button for template
-        st.download_button(
-            label="⬇️ Download Template CSV",
-            data=sample_csv,
-            file_name='frequency_data_template.csv',
-            mime='text/csv',
-        )
-    
-    st.markdown('</div>', unsafe_allow_html=True)  # Close upload container
-    
+                    st.markdown("**Distribusi Band Frekuensi:**")
+                    st.dataframe(band_counts, use_container_width=True)
+        else:
+            st.info("Muat data terlebih dahulu untuk melakukan analisis")
+
 elif app_mode == "📊 Dashboard":
     # Dashboard display - check if data exists
     if st.session_state.data is not None:
@@ -995,6 +986,13 @@ elif app_mode == "📊 Dashboard":
         
         # Get dataframe from session state
         df = st.session_state.data
+        
+        # Show data source info
+        st.markdown(f"""
+        <div class="auto-load-info">
+            <strong>📊 Data Sumber:</strong> {st.session_state.data_source}
+        </div>
+        """, unsafe_allow_html=True)
         
         # Dashboard metrics
         st.markdown("### 📌 Ringkasan")
@@ -1041,145 +1039,262 @@ elif app_mode == "📊 Dashboard":
         with dash_tab1:
             st.markdown("### 🗺️ Peta Distribusi Frekuensi")
             
-            # Map settings in smaller columns
-            map_col1, map_col2, map_col3 = st.columns(3)
+            # Enhanced Filter Section
+            st.markdown('<div class="filter-section">', unsafe_allow_html=True)
+            st.markdown("#### 🔍 Filter Data")
             
-            with map_col1:
-                # Map type selection
+            # Filter row 1: Map type and display mode
+            filter_col1, filter_col2 = st.columns(2)
+            
+            with filter_col1:
                 map_type = st.selectbox(
-                    "Jenis Peta:",
+                    "🗺️ Jenis Peta:",
                     ["OpenStreetMap", "Esri Satellite", "CartoDB Dark"],
                     key="dash_map_type"
                 )
             
-            with map_col2:
-                # Service filter for map
-                dash_services = ["All"] + sorted(df['SERVICE'].unique().tolist())
-                dash_service = st.selectbox("Filter Layanan:", dash_services, key="dash_service")
-            
-            with map_col3:
-                # Display mode
+            with filter_col2:
                 display_mode = st.selectbox(
-                    "Mode Tampilan:",
+                    "👁️ Mode Tampilan:",
                     ["Markers + Heatmap", "Markers", "Heatmap"],
                     key="dash_display_mode"
                 )
             
-            # Filter data based on selection
-            if dash_service != "All":
-                dash_map_data = df[df['SERVICE'] == dash_service].copy()
-            else:
-                dash_map_data = df.copy()
+            # Filter row 2: City, Service, and Client filters
+            filter_col3, filter_col4, filter_col5 = st.columns(3)
             
-            # Optimize data for map display
-            if len(dash_map_data) > max_markers:
-                dash_map_data = optimize_map_data(dash_map_data, max_markers, sampling_method)
-                st.info(f"Dataset terlalu besar ({len(df):,} data). Menampilkan sampel {len(dash_map_data):,} titik untuk performa optimal.")
-            
-            # Define map center
-            avg_lat = dash_map_data['SID_LAT'].mean()
-            avg_long = dash_map_data['SID_LONG'].mean()
-            
-            # Create base map
-            if map_type == "OpenStreetMap":
-                m = folium.Map(location=[avg_lat, avg_long], zoom_start=5, tiles="OpenStreetMap")
-            elif map_type == "Esri Satellite":
-                m = folium.Map(location=[avg_lat, avg_long], zoom_start=5, tiles="Esri Satellite")
-            elif map_type == "CartoDB Dark":
-                m = folium.Map(location=[avg_lat, avg_long], zoom_start=5, tiles="CartoDB dark_matter")
-            
-            # Add plugins
-            MiniMap().add_to(m)
-            Draw(export=True).add_to(m)
-            LocateControl().add_to(m)
-            Fullscreen().add_to(m)
-            MousePosition().add_to(m)
-            
-            # Create feature group for search functionality
-            feature_group = folium.FeatureGroup(name="Locations")
-            feature_group.add_to(m)
-            
-            # Add search plugin with the feature group
-            Search(
-                layer=feature_group,
-                geom_type="Point",
-                placeholder="Cari lokasi...",
-                collapsed=True,
-                search_zoom=12
-            ).add_to(m)
-            
-            # Add markers
-            if display_mode in ["Markers", "Markers + Heatmap"]:
-                marker_cluster = MarkerCluster().add_to(m)
+            with filter_col3:
+                # City filter - Enhanced with search and count
+                dash_cities = ["All"] + sorted(df['CITY'].unique().tolist())
+                city_counts = df['CITY'].value_counts()
                 
-                # Add markers with popups
-                for _, row in dash_map_data.iterrows():
-                    service_info = get_service_icon(row['SERVICE'])
-                    icon_color = service_info['color']
+                # Format city options with counts
+                city_options = ["All (Semua Kota)"]
+                for city in dash_cities[1:]:  # Skip "All"
+                    count = city_counts.get(city, 0)
+                    city_options.append(f"{city} ({count:,} lokasi)")
+                
+                selected_city_idx = st.selectbox(
+                    "🏙️ Filter Kota:",
+                    range(len(city_options)),
+                    format_func=lambda x: city_options[x],
+                    key="dash_city"
+                )
+                
+                # Get actual city name
+                if selected_city_idx == 0:
+                    dash_city = "All"
+                else:
+                    dash_city = dash_cities[selected_city_idx]
+            
+            with filter_col4:
+                # Service filter with counts
+                dash_services = ["All"] + sorted(df['SERVICE'].unique().tolist())
+                service_counts = df['SERVICE'].value_counts()
+                
+                service_options = ["All (Semua Layanan)"]
+                for service in dash_services[1:]:
+                    count = service_counts.get(service, 0)
+                    service_options.append(f"{service} ({count:,} lokasi)")
+                
+                selected_service_idx = st.selectbox(
+                    "📡 Filter Layanan:",
+                    range(len(service_options)),
+                    format_func=lambda x: service_options[x],
+                    key="dash_service"
+                )
+                
+                if selected_service_idx == 0:
+                    dash_service = "All"
+                else:
+                    dash_service = dash_services[selected_service_idx]
+            
+            with filter_col5:
+                # Client filter (optional, only if many clients)
+                if df['CLNT_NAME'].nunique() <= 50:  # Show client filter only if reasonable number
+                    dash_clients = ["All"] + sorted(df['CLNT_NAME'].unique().tolist())
+                    client_counts = df['CLNT_NAME'].value_counts()
                     
-                    # Create custom icon
-                    icon = folium.Icon(
-                        icon=service_info['icon'],
-                        prefix='fa',
-                        color='white',
-                        icon_color=icon_color
+                    client_options = ["All (Semua Klien)"]
+                    for client in dash_clients[1:]:
+                        count = client_counts.get(client, 0)
+                        client_options.append(f"{client} ({count:,} lokasi)")
+                    
+                    selected_client_idx = st.selectbox(
+                        "🏢 Filter Klien:",
+                        range(len(client_options)),
+                        format_func=lambda x: client_options[x],
+                        key="dash_client"
                     )
                     
-                    # Create popup
-                    popup_content = create_popup_content(row)
-                    popup = folium.Popup(folium.Html(popup_content, script=True), max_width=350)
-                    
-                    # Add marker to cluster
-                    folium.Marker(
-                        location=[row['SID_LAT'], row['SID_LONG']],
-                        popup=popup,
-                        icon=icon,
-                        tooltip=f"{row['STN_NAME']} - {row['SERVICE']}"
-                    ).add_to(marker_cluster)
+                    if selected_client_idx == 0:
+                        dash_client = "All"
+                    else:
+                        dash_client = dash_clients[selected_client_idx]
+                else:
+                    dash_client = "All"
+                    st.info(f"Filter klien disembunyikan ({df['CLNT_NAME'].nunique():,} klien unik)")
             
-            # Add heatmap
-            if display_mode in ["Heatmap", "Markers + Heatmap"]:
-                # Extract coordinates for heatmap
-                heat_data = [[row['SID_LAT'], row['SID_LONG']] for _, row in dash_map_data.iterrows()]
+            # Frequency filter (if frequency data available)
+            if 'FREQ_MHZ' in df.columns:
+                st.markdown("#### 📊 Filter Frekuensi")
+                freq_col1, freq_col2 = st.columns(2)
                 
-                # Add heat map to the map
-                HeatMap(heat_data, radius=15, blur=10, gradient={0.4: 'blue', 0.65: 'lime', 0.8: 'yellow', 1: 'red'}).add_to(m)
+                with freq_col1:
+                    min_freq = float(df['FREQ_MHZ'].min())
+                    max_freq = float(df['FREQ_MHZ'].max())
+                    freq_range = st.slider(
+                        "🔊 Rentang Frekuensi (MHz):",
+                        min_value=min_freq,
+                        max_value=max_freq,
+                        value=(min_freq, max_freq),
+                        key="dash_freq_range"
+                    )
+                
+                with freq_col2:
+                    # Frequency band filter
+                    freq_bands = ["All"] + sorted(df['FREQ_MHZ'].apply(get_frequency_band).unique().tolist())
+                    selected_band = st.selectbox(
+                        "📈 Filter Band Frekuensi:",
+                        freq_bands,
+                        key="dash_freq_band"
+                    )
+            else:
+                freq_range = None
+                selected_band = "All"
             
-            # Add legend
-            legend_html = """
-            <div style="position: fixed; bottom: 50px; right: 50px; z-index: 1000; background-color: white; 
-                        padding: 10px; border: 2px solid grey; border-radius: 5px;">
-                <p style="text-align: center; font-weight: bold; margin-bottom: 10px;">Legenda Layanan</p>
-            """
+            st.markdown('</div>', unsafe_allow_html=True)
             
-            # Add legend items based on unique services
-            for service in sorted(dash_map_data['SERVICE'].unique()):
-                service_info = get_service_icon(service)
-                legend_html += f"""
-                <div class="legend-item">
-                    <div class="legend-color" style="background-color: {service_info['color']};"></div>
-                    <div>{service}</div>
-                </div>
-                """
+            # Apply all filters
+            filtered_data = apply_filters(df, dash_city, dash_service, dash_client, freq_range)
             
-            legend_html += """
+            # Apply frequency band filter if available
+            if 'FREQ_MHZ' in df.columns and selected_band != "All":
+                filtered_data = filtered_data[filtered_data['FREQ_MHZ'].apply(get_frequency_band) == selected_band]
+            
+            # Show filter results
+            st.markdown(f"""
+            <div class="info-box">
+                📍 <strong>Data Terfilter:</strong> {len(filtered_data):,} dari {len(df):,} lokasi 
+                ({(len(filtered_data)/len(df)*100):.1f}%)
             </div>
-            """
+            """, unsafe_allow_html=True)
             
-            # Add legend as HTML
-            m.get_root().html.add_child(folium.Element(legend_html))
-            
-            # Display map
-            folium_static(m, width=1000, height=550)
+            if len(filtered_data) == 0:
+                st.warning("⚠️ Tidak ada data yang sesuai dengan filter. Silakan sesuaikan kriteria filter.")
+            else:
+                # Optimize data for map display
+                if len(filtered_data) > max_markers:
+                    dash_map_data = optimize_map_data(filtered_data, max_markers, sampling_method)
+                    st.info(f"Dataset terfilter terlalu besar ({len(filtered_data):,} data). Menampilkan sampel {len(dash_map_data):,} titik untuk performa optimal.")
+                else:
+                    dash_map_data = filtered_data
+                
+                # Define map center
+                avg_lat = dash_map_data['SID_LAT'].mean()
+                avg_long = dash_map_data['SID_LONG'].mean()
+                
+                # Create base map
+                if map_type == "OpenStreetMap":
+                    m = folium.Map(location=[avg_lat, avg_long], zoom_start=6, tiles="OpenStreetMap")
+                elif map_type == "Esri Satellite":
+                    m = folium.Map(location=[avg_lat, avg_long], zoom_start=6, 
+                                  tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                                  attr="Esri")
+                elif map_type == "CartoDB Dark":
+                    m = folium.Map(location=[avg_lat, avg_long], zoom_start=6, tiles="CartoDB dark_matter")
+                
+                # Add plugins
+                MiniMap().add_to(m)
+                LocateControl().add_to(m)
+                Fullscreen().add_to(m)
+                MousePosition().add_to(m)
+                
+                # Add markers
+                if display_mode in ["Markers", "Markers + Heatmap"]:
+                    marker_cluster = MarkerCluster().add_to(m)
+                    
+                    for _, row in dash_map_data.iterrows():
+                        service_info = get_service_icon(row['SERVICE'])
+                        icon_color = service_info['color']
+                        
+                        # Create popup
+                        popup_content = create_popup_content(row)
+                        popup = folium.Popup(folium.Html(popup_content, script=True), max_width=350)
+                        
+                        # Add marker to cluster
+                        folium.Marker(
+                            location=[row['SID_LAT'], row['SID_LONG']],
+                            popup=popup,
+                            icon=folium.Icon(color='blue', icon='info-sign'),
+                            tooltip=f"{row['STN_NAME']} - {row['SERVICE']}"
+                        ).add_to(marker_cluster)
+                
+                # Add heatmap
+                if display_mode in ["Heatmap", "Markers + Heatmap"]:
+                    heat_data = [[row['SID_LAT'], row['SID_LONG']] for _, row in dash_map_data.iterrows()]
+                    HeatMap(heat_data, radius=15, blur=10).add_to(m)
+                
+                # Add legend for services
+                if display_mode in ["Markers", "Markers + Heatmap"]:
+                    legend_html = """
+                    <div style="position: fixed; bottom: 50px; right: 50px; z-index: 1000; background-color: white; 
+                                padding: 10px; border: 2px solid grey; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">
+                        <p style="text-align: center; font-weight: bold; margin-bottom: 10px;">Legenda Layanan</p>
+                    """
+                    
+                    # Add legend items based on unique services in the filtered data
+                    for service in sorted(dash_map_data['SERVICE'].unique()):
+                        service_info = get_service_icon(service)
+                        count = len(dash_map_data[dash_map_data['SERVICE'] == service])
+                        legend_html += f"""
+                        <div style="display: flex; align-items: center; margin-bottom: 5px;">
+                            <div style="width: 20px; height: 20px; border-radius: 50%; background-color: {service_info['color']}; margin-right: 8px;"></div>
+                            <span style="font-size: 12px;">{service} ({count})</span>
+                        </div>
+                        """
+                    
+                    legend_html += """
+                    </div>
+                    """
+                    
+                    # Add legend as HTML
+                    m.get_root().html.add_child(folium.Element(legend_html))
+                
+                # Display map
+                st.markdown("#### 🗺️ Peta Interaktif")
+                folium_static(m, width=1000, height=600)
+                
+                # Show additional statistics
+                st.markdown("#### 📊 Statistik Data Terfilter")
+                stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+                
+                with stat_col1:
+                    st.metric("📍 Total Lokasi", f"{len(filtered_data):,}")
+                
+                with stat_col2:
+                    st.metric("🏙️ Jumlah Kota", f"{filtered_data['CITY'].nunique():,}")
+                
+                with stat_col3:
+                    st.metric("📡 Jenis Layanan", f"{filtered_data['SERVICE'].nunique():,}")
+                
+                with stat_col4:
+                    st.metric("🏢 Jumlah Klien", f"{filtered_data['CLNT_NAME'].nunique():,}")
+                
+                # Export filtered data
+                if st.button("📥 Export Data Terfilter", key="export_filtered"):
+                    csv = filtered_data.to_csv(index=False)
+                    b64 = base64.b64encode(csv.encode()).decode()
+                    href = f'<a href="data:file/csv;base64,{b64}" download="filtered_frequency_data.csv">Download CSV</a>'
+                    st.markdown(href, unsafe_allow_html=True)
         
         with dash_tab2:
             st.markdown("### 📊 Statistik Layanan Frekuensi")
             
-            # Create service statistics
+            # Service distribution
             service_counts = df['SERVICE'].value_counts().reset_index()
             service_counts.columns = ['SERVICE', 'COUNT']
             
-            # Create bar chart
             fig = px.bar(
                 service_counts,
                 x='SERVICE',
@@ -1189,46 +1304,56 @@ elif app_mode == "📊 Dashboard":
                 labels={'SERVICE': 'Jenis Layanan', 'COUNT': 'Jumlah'}
             )
             
-            # Update layout
             fig.update_layout(xaxis_title='Jenis Layanan', yaxis_title='Jumlah')
-            
-            # Show plot
             st.plotly_chart(fig, use_container_width=True)
             
-            # Check if frequency data exists
+            # Check if frequency data exists for additional analysis
             if 'FREQ_MHZ' in df.columns:
-                # Subservice by frequency
-                subservice_freq = df.groupby(['SERVICE', 'SUBSERVICE'])['FREQ_MHZ'].mean().reset_index()
+                # Frequency analysis by service
+                freq_col1, freq_col2 = st.columns(2)
                 
-                # Create grouped bar chart
-                fig2 = px.bar(
-                    subservice_freq,
-                    x='SERVICE',
-                    y='FREQ_MHZ',
-                    color='SUBSERVICE',
-                    title='Rata-rata Frekuensi per Subservice',
-                    labels={'SERVICE': 'Jenis Layanan', 'FREQ_MHZ': 'Rata-rata Frekuensi (MHz)', 'SUBSERVICE': 'Sub-layanan'}
-                )
+                with freq_col1:
+                    # Box plot of frequency by service
+                    fig_box = px.box(
+                        df,
+                        x='SERVICE',
+                        y='FREQ_MHZ',
+                        color='SERVICE',
+                        title='Distribusi Frekuensi per Layanan',
+                        labels={'SERVICE': 'Jenis Layanan', 'FREQ_MHZ': 'Frekuensi (MHz)'}
+                    )
+                    fig_box.update_layout(xaxis_title='Jenis Layanan', yaxis_title='Frekuensi (MHz)')
+                    st.plotly_chart(fig_box, use_container_width=True)
                 
-                # Update layout
-                fig2.update_layout(xaxis_title='Jenis Layanan', yaxis_title='Rata-rata Frekuensi (MHz)')
-                
-                # Show plot
-                st.plotly_chart(fig2, use_container_width=True)
+                with freq_col2:
+                    # Average frequency per service
+                    avg_freq_service = df.groupby('SERVICE')['FREQ_MHZ'].mean().reset_index()
+                    avg_freq_service.columns = ['SERVICE', 'AVG_FREQ']
+                    avg_freq_service = avg_freq_service.sort_values('AVG_FREQ')
+                    
+                    fig_avg = px.bar(
+                        avg_freq_service,
+                        y='SERVICE',
+                        x='AVG_FREQ',
+                        color='SERVICE',
+                        title='Rata-rata Frekuensi per Layanan',
+                        labels={'SERVICE': 'Jenis Layanan', 'AVG_FREQ': 'Rata-rata Frekuensi (MHz)'},
+                        orientation='h'
+                    )
+                    fig_avg.update_layout(yaxis_title='Jenis Layanan', xaxis_title='Rata-rata Frekuensi (MHz)')
+                    st.plotly_chart(fig_avg, use_container_width=True)
             
             # Subservice distribution
             subservice_counts = df['SUBSERVICE'].value_counts().reset_index()
             subservice_counts.columns = ['SUBSERVICE', 'COUNT']
             
-            # Limit to top 15 subservices for readability
             if len(subservice_counts) > 15:
                 subservice_counts = subservice_counts.head(15)
                 title = 'Distribusi Sub-layanan (Top 15)'
             else:
                 title = 'Distribusi Sub-layanan'
             
-            # Create horizontal bar chart
-            fig3 = px.bar(
+            fig2 = px.bar(
                 subservice_counts,
                 y='SUBSERVICE',
                 x='COUNT',
@@ -1239,27 +1364,21 @@ elif app_mode == "📊 Dashboard":
                 color_continuous_scale='Viridis'
             )
             
-            # Update layout
-            fig3.update_layout(yaxis_title='Sub-layanan', xaxis_title='Jumlah', yaxis={'categoryorder':'total ascending'})
-            
-            # Show plot
-            st.plotly_chart(fig3, use_container_width=True)
+            fig2.update_layout(yaxis_title='Sub-layanan', xaxis_title='Jumlah', yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig2, use_container_width=True)
         
         with dash_tab3:
             st.markdown("### 🏙️ Distribusi Kota")
             
-            # Create city statistics
             city_counts = df['CITY'].value_counts().reset_index()
             city_counts.columns = ['CITY', 'COUNT']
             
-            # Limit to top 20 cities
             if len(city_counts) > 20:
                 city_counts = city_counts.head(20)
                 title = 'Top 20 Kota berdasarkan Jumlah Pemancar'
             else:
                 title = 'Kota berdasarkan Jumlah Pemancar'
             
-            # Create horizontal bar chart
             fig = px.bar(
                 city_counts,
                 y='CITY',
@@ -1271,115 +1390,67 @@ elif app_mode == "📊 Dashboard":
                 color_continuous_scale='Blues'
             )
             
-            # Update layout
             fig.update_layout(yaxis_title='Kota', xaxis_title='Jumlah Pemancar', yaxis={'categoryorder':'total ascending'})
-            
-            # Show plot
             st.plotly_chart(fig, use_container_width=True)
             
-            # Distribution of services per city (heatmap)
-            city_service = pd.crosstab(df['CITY'], df['SERVICE'])
-            
-            # Limit to top 15 cities by total
-            if len(city_service) > 15:
-                city_totals = city_service.sum(axis=1)
-                top_cities = city_totals.nlargest(15).index
-                city_service = city_service.loc[top_cities]
-                title = 'Distribusi Layanan per Kota (Top 15 Kota)'
-            else:
-                title = 'Distribusi Layanan per Kota'
-            
-            # Create heatmap
-            fig2 = px.imshow(
-                city_service,
-                labels=dict(x="Jenis Layanan", y="Kota", color="Jumlah Pemancar"),
-                title=title,
-                aspect="auto",
-                color_continuous_scale='YlGnBu'
-            )
-            
-            # Update layout
-            fig2.update_layout(xaxis_title='Jenis Layanan', yaxis_title='Kota')
-            
-            # Show plot
-            st.plotly_chart(fig2, use_container_width=True)
-            
-            # Create map of stations by city
-            st.markdown("#### Peta Distribusi Pemancar per Kota")
-            
-            # Create map with city markers
-            city_data = df.groupby('CITY').agg({
-                'SID_LAT': 'mean',
-                'SID_LONG': 'mean',
-                'STN_NAME': 'count'
-            }).reset_index()
-            
-            # Rename columns
-            city_data.rename(columns={'STN_NAME': 'COUNT'}, inplace=True)
-            
-            # Create map
-            city_map = folium.Map(location=[city_data['SID_LAT'].mean(), city_data['SID_LONG'].mean()], zoom_start=5, tiles="OpenStreetMap")
-            
-            # Add city markers with scaled sizes
-            for _, row in city_data.iterrows():
-                # Scale marker size based on count (min 10, max 40)
-                marker_size = min(40, max(10, int(10 * np.log10(row['COUNT']))))
+            # Create cross-tab analysis between cities and services
+            if df['CITY'].nunique() <= 20:  # Only show if reasonable number of cities
+                st.markdown("#### 🔥 Heatmap Layanan per Kota")
                 
-                # Create popup content
-                popup_content = f"""
-                <div style="font-family: 'Segoe UI', sans-serif; min-width: 200px; max-width: 300px;">
-                    <h3 style="margin-bottom: 10px;">{row['CITY']}</h3>
-                    <p><b>Jumlah Pemancar:</b> {row['COUNT']:,}</p>
-                    <p><b>Koordinat:</b> {row['SID_LAT']:.6f}, {row['SID_LONG']:.6f}</p>
-                </div>
-                """
+                # Create cross-tabulation
+                city_service_cross = pd.crosstab(df['CITY'], df['SERVICE'])
                 
-                # Create popup
-                popup = folium.Popup(folium.Html(popup_content, script=True), max_width=300)
+                # Create heatmap
+                fig_heatmap = px.imshow(
+                    city_service_cross,
+                    labels=dict(x="Jenis Layanan", y="Kota", color="Jumlah Pemancar"),
+                    title="Distribusi Layanan per Kota",
+                    aspect="auto",
+                    color_continuous_scale='YlOrRd'
+                )
                 
-                # Add circle marker
-                folium.CircleMarker(
-                    location=[row['SID_LAT'], row['SID_LONG']],
-                    radius=marker_size,
-                    popup=popup,
-                    color='#3186cc',
-                    fill=True,
-                    fill_color='#3186cc',
-                    fill_opacity=0.7,
-                    tooltip=f"{row['CITY']} ({row['COUNT']} pemancar)"
-                ).add_to(city_map)
+                fig_heatmap.update_layout(
+                    xaxis_title='Jenis Layanan', 
+                    yaxis_title='Kota',
+                    height=400
+                )
+                
+                st.plotly_chart(fig_heatmap, use_container_width=True)
             
-            # Add plugins
-            MiniMap().add_to(city_map)
+            # City statistics summary
+            st.markdown("#### 📈 Statistik Kota")
             
-            # Display map
-            folium_static(city_map, width=1000, height=500)
+            city_stats = df.groupby('CITY').agg({
+                'STN_NAME': 'count',
+                'SERVICE': 'nunique',
+                'CLNT_NAME': 'nunique'
+            }).rename(columns={
+                'STN_NAME': 'Total_Pemancar',
+                'SERVICE': 'Jenis_Layanan',
+                'CLNT_NAME': 'Jumlah_Klien'
+            }).sort_values('Total_Pemancar', ascending=False)
+            
+            # Add frequency stats if available
+            if 'FREQ_MHZ' in df.columns:
+                freq_stats = df.groupby('CITY')['FREQ_MHZ'].agg(['mean', 'min', 'max']).round(2)
+                freq_stats.columns = ['Rata_Freq_MHz', 'Min_Freq_MHz', 'Max_Freq_MHz']
+                city_stats = pd.concat([city_stats, freq_stats], axis=1)
+            
+            st.dataframe(city_stats.head(20), use_container_width=True)
     else:
-        # No data available - show dashboard placeholder
+        # No data available
         st.markdown('<p class="sub-header">📊 Dashboard Informasi Frekuensi</p>', unsafe_allow_html=True)
         
         st.markdown("""
         <div class="warning-box">
             <h3>Data Belum Tersedia</h3>
             <p>Belum ada data frekuensi yang diunggah untuk ditampilkan di dashboard.</p>
-            <p>Silakan beralih ke tab "🗂️ Upload & Analisis" untuk mengunggah data CSV.</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Show sample dashboard
-        st.markdown("### 🖼️ Preview Dashboard")
-        st.image("komdigi.png", width=250, caption="Contoh tampilan dashboard dengan data frekuensi")
-        
-        # Quick instructions
-        st.markdown("""
-        <div class="info-box">
-            <h3>Cara Menggunakan Dashboard</h3>
-            <ol>
-                <li>Unggah file CSV data frekuensi di tab "🗂️ Upload & Analisis"</li>
-                <li>Pastikan file memiliki kolom yang diperlukan (CITY, CLNT_NAME, STN_NAME, SERVICE, SUBSERVICE, SID_LAT, SID_LONG)</li>
-                <li>Setelah berhasil diunggah, kembali ke tab "📊 Dashboard" untuk melihat visualisasi data</li>
-                <li>Gunakan filter yang tersedia untuk memfokuskan analisis pada data tertentu</li>
-            </ol>
+            <p>Gunakan salah satu opsi berikut:</p>
+            <ul>
+                <li>Klik tombol "🚀 Auto-Load Data Terbaik" di sidebar</li>
+                <li>Beralih ke tab "🗂️ Data Manager" untuk upload manual</li>
+                <li>Gunakan "📁 File Browser" untuk memilih file</li>
+            </ul>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1389,218 +1460,135 @@ elif app_mode == "📝 Tentang Aplikasi":
     
     st.markdown("""
     <div class="info-box">
-    <h3>Sistem Informasi Manajemen Frekuensi</h3>
-    <p>Aplikasi ini dirancang untuk mempermudah pengelolaan dan visualisasi data frekuensi radio beserta lokasi penggunanya. Aplikasi ini membantu regulator, operator, dan pihak terkait untuk menganalisis penggunaan spektrum frekuensi di berbagai wilayah secara efektif.</p>
+    <h3>Sistem Informasi Manajemen Frekuensi v3.1</h3>
+    <p>Aplikasi ini dirancang untuk mempermudah pengelolaan dan visualisasi data frekuensi radio beserta lokasi penggunanya. 
+    Versi 3.1 memiliki fitur enhanced filtering termasuk filter kota yang komprehensif pada peta distribusi frekuensi.</p>
     </div>
     """, unsafe_allow_html=True)
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("### 🎯 Manfaat Aplikasi")
+        st.markdown("### 🎯 Fitur Baru v3.1")
         st.markdown("""
-        - **Visualisasi Interaktif**: Tampilkan data frekuensi pada peta interaktif multi-layer
-        - **Analisis Mendalam**: Identifikasi pola penggunaan spektrum dan potensi interferensi
-        - **Kemudahan Monitoring**: Pantau penggunaan spektrum berdasarkan wilayah dan layanan
-        - **Pelaporan Fleksibel**: Hasilkan laporan dan ekspor data untuk analisis lebih lanjut
-        - **Perencanaan Spektrum**: Dukung pengambilan keputusan alokasi spektrum yang efisien
+        - **🏙️ Enhanced City Filter**: Filter kota dengan hitungan lokasi real-time
+        - **📊 Multi-Filter Dashboard**: Filter berdasarkan kota, layanan, klien, dan frekuensi
+        - **🔍 Smart Filter Interface**: Interface filter yang lebih intuitif dengan info statistik
+        - **📈 Advanced Statistics**: Statistik detail per kota dengan analisis cross-tab
+        - **🗺️ Interactive Legend**: Legend dinamis yang menunjukkan jumlah lokasi per layanan
+        - **📥 Export Filtered Data**: Export data hasil filter langsung dari dashboard
         """)
     
     with col2:
         st.markdown("### 🔑 Fitur Utama")
         st.markdown("""
-        - **Peta Multi-Layer**: Visualisasi menggunakan beragam jenis peta, termasuk satelit
-        - **Filter Data Dinamis**: Filter berdasarkan lokasi, layanan, frekuensi, dan klien
-        - **Clustering Otomatis**: Kelompokkan marker untuk tampilan yang lebih bersih
+        - **🤖 Auto-Load Data**: Membaca file CSV otomatis dari folder 'data'
+        - **📁 File Browser**: Jelajahi dan kelola file di folder data
+        - **🗂️ Data Manager**: Manajemen data terpusat dengan analisis kualitas
+        - **Peta Multi-Layer**: Visualisasi dengan berbagai jenis peta
+        - **Filter Data Dinamis**: Filter berdasarkan berbagai kriteria
+        - **Clustering Otomatis**: Optimasi tampilan untuk dataset besar
         - **Heat Map**: Visualisasi kepadatan penggunaan frekuensi
-        - **Analitik Frekuensi**: Grafik dan statistik distribusi penggunaan spektrum
-        - **Pencarian & Navigasi**: Temukan lokasi spesifik dengan mudah
-        - **Ekspor Data**: Unduh data terfilter untuk analisis lanjutan
-        - **Dukungan Dataset Besar**: Mampu menangani dan memvisualisasikan hingga 20,000+ titik data
+        - **Analitik Frekuensi**: Grafik dan statistik komprehensif
         """)
     
-    st.markdown('<p class="sub-header">📋 Panduan Penggunaan</p>', unsafe_allow_html=True)
-    
-    # User guide with tabs for different sections
-    panduan_tab1, panduan_tab2, panduan_tab3 = st.tabs(["📤 Upload Data", "🗺️ Penggunaan Peta", "📊 Analisis Data"])
-    
-    with panduan_tab1:
-        st.markdown("### Upload Data Frekuensi")
-        st.markdown("""
-        1. **Format Data**: Gunakan file CSV dengan kolom wajib berikut:
-           - `CITY` - Kota lokasi pemancar
-           - `CLNT_NAME` - Nama klien/pengguna frekuensi
-           - `STN_NAME` - Nama stasiun/pemancar
-           - `SERVICE` - Kategori layanan (Broadcasting, Mobile, Satellite, dll)
-           - `SUBSERVICE` - Sub kategori layanan (FM Radio, 4G LTE, 5G, dll)
-           - `SID_LONG` - Koordinat longitude (bujur) lokasi
-           - `SID_LAT` - Koordinat latitude (lintang) lokasi
-           
-        2. **Kolom Opsional** yang memperkaya analisis:
-           - `FREQ_MHZ` - Frekuensi dalam MHz
-           - `BW_MHZ` - Bandwidth dalam MHz
-           - `DATE` - Tanggal registrasi/pembaruan data
-           - `TX_POWER` - Daya pancar dalam Watt
-           - `ANTENNA_HEIGHT` - Tinggi antena dalam meter
-           - `POLARIZATION` - Polarisasi antena
-           
-        3. **Proses Upload**:
-           - Klik tombol "Browse files" di panel Upload
-           - Pilih file CSV dari perangkat Anda
-           - Sistem akan memvalidasi struktur dan isi data
-           - Jika ada kolom yang tidak valid, sistem akan memberi peringatan
-           
-        4. **Penanganan Dataset Besar**:
-           - Aplikasi ini mendukung dataset hingga 20,000+ baris
-           - Untuk dataset sangat besar, sistem menggunakan metode sampling untuk mengoptimalkan tampilan
-           - Anda dapat memilih metode sampling di panel Pengaturan Performa
-           - Data asli tetap utuh untuk analisis, hanya tampilan peta yang dioptimasi
-           
-        > 💡 **Tip**: Pastikan koordinat dalam format desimal (misal: -6.2088, 106.8456) dan kisaran yang valid (Latitude: -90 hingga 90, Longitude: -180 hingga 180)
-        """)
-        
-        # Sample CSV template
-        st.markdown("#### Contoh Template CSV")
-        
-        sample_csv = """CITY,CLNT_NAME,STN_NAME,SERVICE,SUBSERVICE,SID_LAT,SID_LONG,FREQ_MHZ,BW_MHZ
-Jakarta,PT Telkom,Jakarta Tower,Broadcasting,FM Radio,-6.2088,106.8456,98.5,0.2
-Surabaya,PT Media Networks,Surabaya Station,Mobile,4G LTE,-7.2575,112.7520,1800.0,20.0
-Bandung,PT Broadcast Indonesia,Bandung Relay,Cellular,5G,-6.9175,107.6191,2600.0,40.0
-Medan,PT Radio Sentosa,Medan Transmitter,Broadcasting,TV,3.5952,98.6722,205.0,0.1
-Makassar,PT Telkom,Makassar Tower,Satellite,Internet,-5.1477,119.4144,14000.0,36.0
-Semarang,PT Radio Indonesia,Semarang Station,Radio,AM Radio,-6.9932,110.4203,540.0,0.01"""
-        
-        st.code(sample_csv, language="csv")
-        
-        # Download button for template
-        st.download_button(
-            label="Download Template CSV",
-            data=sample_csv,
-            file_name='frequency_data_template.csv',
-            mime='text/csv',
-        )
-    
-    with panduan_tab2:
-        st.markdown("### Menggunakan Peta Interaktif")
-        st.markdown("""
-        #### Fitur-fitur Peta:
-        
-        1. **Jenis Peta**:
-           - **OpenStreetMap**: Peta dasar dengan tampilan jalan dan bangunan
-           - **Esri Satellite**: Peta satelit dengan resolusi tinggi
-           - **CartoDB Dark**: Peta gelap untuk kontras marker yang lebih baik
-           - **Hybrid Map**: Kombinasi peta satelit dengan label jalan
-        
-        2. **Marker & Icon**:
-           - Setiap marker mewakili lokasi stasiun/pemancar frekuensi
-           - Warna dan ikon marker bervariasi berdasarkan jenis layanan
-           - Klik marker untuk melihat informasi detail dalam popup
-        
-        3. **Layer & Filter**:
-           - **Layer Service**: Filter marker berdasarkan jenis layanan (Broadcasting, Mobile, dll)
-           - **Layer Frekuensi**: Filter marker berdasarkan rentang frekuensi (HF, VHF, UHF, dll)
-           - **Heatmap**: Tampilkan peta panas kepadatan penggunaan frekuensi
-           - **Cluster**: Kelompokkan marker yang berdekatan (berguna untuk data banyak)
-        
-        4. **Navigasi Peta**:
-           - **Zoom**: Gunakan tombol +/- atau scroll mouse untuk zoom in/out
-           - **Pan**: Klik dan tahan untuk menggeser peta
-           - **Kotak Pencarian**: Cari lokasi spesifik dengan memasukkan nama
-           - **Minimap**: Tampilan konteks area yang sedang dilihat
-        
-        5. **Alat Tambahan**:
-           - **Ruler**: Ukur jarak antar titik
-           - **Drawing**: Gambar area untuk analisis
-           - **Full Screen**: Tampilkan peta dalam layar penuh
-           - **Koordinat**: Lihat posisi koordinat kursor
-        
-        6. **Penanganan Data Besar**:
-           - Untuk dataset besar (>5000 titik), sistem menggunakan clustering otomatis
-           - Anda dapat memilih metode sampling untuk mengoptimalkan performa:
-             - **Random**: Memilih titik secara acak (cepat, tetapi mungkin tidak representatif)
-             - **Cluster**: Menggunakan K-means clustering untuk memilih titik yang representatif
-             - **Grid**: Membagi area menjadi grid dan mengambil sampel dari setiap sel
-        
-        > 💡 **Tip**: Untuk analisis interferensi, gunakan fitur "buffer" dengan mengaktifkan tombol lingkaran pada alat drawing, kemudian atur radius sesuai kebutuhan
-        """)
-        
-        # Map legend and examples
-        st.markdown("#### Contoh Tampilan Peta & Legenda")
-        st.image("https://i.imgur.com/LMPFZLK.png", caption="Contoh tampilan peta dengan marker lokasi frekuensi")
-    
-    with panduan_tab3:
-        st.markdown("### Analisis & Visualisasi Data")
-        st.markdown("""
-        #### Jenis Visualisasi:
-        
-        1. **Dashboard Ringkasan**:
-           - Statistik jumlah total data, kota, klien, dll
-           - Grafik distribusi layanan
-           - Pie chart persentase jenis layanan
-        
-        2. **Visualisasi Koordinat**:
-           - Peta interaktif dengan marker lokasi
-           - Heatmap kepadatan lokasi
-           - Scatter plot distribusi koordinat
-        
-        3. **Analisis Frekuensi**:
-           - Histogram distribusi frekuensi
-           - Grafik pita frekuensi per layanan
-           - Visualisasi 3D koordinat dan frekuensi
-        
-        4. **Distribusi Geografis**:
-           - Bar chart jumlah pengguna per kota
-           - Heatmap layanan per kota
-           - Choropleth map kepadatan frekuensi per wilayah
-        
-        #### Tips Analisis Data:
-        
-        - **Analisis Interferensi**: Gunakan filter frekuensi dan radius untuk mengidentifikasi potensi interferensi antar pemancar
-        - **Perencanaan Spektrum**: Analisis kepadatan penggunaan frekuensi untuk menemukan pita frekuensi yang masih tersedia
-        - **Optimasi Jaringan**: Identifikasi area dengan cakupan rendah atau tinggi untuk optimasi jaringan
-        - **Kepatuhan Regulasi**: Verifikasi apakah penggunaan frekuensi sesuai dengan alokasi yang diizinkan
-        - **Dataset Besar**: Untuk analisis dataset >10,000 baris, gunakan fitur filter untuk memfokuskan pada subset data yang relevan
-        """)
-    
-    # System requirements and technical info
-    st.markdown('<p class="sub-header">🔧 Informasi Teknis</p>', unsafe_allow_html=True)
-    
-    tech_col1, tech_col2 = st.columns(2)
-    
-    with tech_col1:
-        st.markdown("### Persyaratan Sistem")
-        st.markdown("""
-        - **Browser**: Chrome, Firefox, Safari, atau Edge versi terbaru
-        - **Koneksi Internet**: Diperlukan untuk mengakses peta dan menampilkan data
-        - **Perangkat**: Dapat diakses dari desktop, laptop, atau tablet
-        - **Penyimpanan**: Minimal 4GB RAM untuk data berukuran besar
-        - **Performa Optimal**: Untuk dataset >10,000 baris, disarankan menggunakan komputer dengan spesifikasi yang memadai
-        """)
-    
-    with tech_col2:
-        st.markdown("### Teknologi yang Digunakan")
-        st.markdown("""
-        - **Framework**: Streamlit untuk antarmuka web interaktif
-        - **Visualisasi**: Folium, Plotly, dan Matplotlib
-        - **Analisis Data**: Pandas dan NumPy
-        - **Kartografi**: OpenStreetMap, Mapbox, ESRI, CartoDB
-        - **UI/UX**: HTML/CSS dengan font-awesome icons
-        - **Optimasi**: K-means clustering dan sampling grid untuk penanganan dataset besar
-        """)
-    
-    # Credits and footer
-    st.markdown("---")
+    st.markdown("### 📋 Setup Folder Data")
     st.markdown("""
-    <div class="footer">
-        <p><strong>Sistem Informasi Manajemen Frekuensi</strong> © 2025</p>
-        <p>Dikembangkan dengan ❤️ untuk pengelolaan spektrum frekuensi yang lebih baik</p>
-    </div>
-    """, unsafe_allow_html=True)
+    Untuk menggunakan fitur auto-load, buat struktur folder sebagai berikut:
+    """)
+    
+    st.code("""
+your_app_directory/
+├── app.py (file aplikasi utama)
+├── data/                    # Folder untuk file CSV
+│   ├── frequency_data_2024.csv
+│   ├── frequency_data_2025.csv
+│   ├── backup_data.csv
+│   └── monthly_report.csv
+├── komdigi.png (opsional)
+└── requirements.txt
+    """)
+    
+    st.markdown("### 🚀 Cara Menggunakan Enhanced Filter")
+    
+    with st.expander("📖 Panduan Penggunaan Filter Baru"):
+        st.markdown("""
+        #### 1. Filter Kota (Enhanced)
+        - **Tampilan Otomatis**: Setiap opsi kota menampilkan jumlah lokasi dalam kurung
+        - **Pencarian Cepat**: Gunakan dropdown yang dapat dicari untuk kota dengan banyak pilihan
+        - **Statistik Real-time**: Melihat jumlah lokasi yang tersedia per kota
+        
+        #### 2. Filter Multi-Kriteria
+        - **Kombinasi Filter**: Gabungkan filter kota, layanan, dan klien sekaligus
+        - **Filter Frekuensi**: Gunakan slider untuk rentang frekuensi atau pilih band tertentu
+        - **Preview Hasil**: Lihat jumlah data terfilter sebelum tampil di peta
+        
+        #### 3. Visualisasi Interaktif
+        - **Legend Dinamis**: Legend menampilkan jumlah lokasi per jenis layanan
+        - **Export Data**: Ekspor hasil filter langsung dalam format CSV
+        - **Statistik Detail**: Lihat breakdown statistik dari data yang terfilter
+        
+        #### 4. Tips Optimasi Performa
+        - **Dataset Besar**: Sistem otomatis mengoptimasi tampilan untuk dataset >10,000 titik
+        - **Sampling Method**: Pilih metode sampling di sidebar untuk performa terbaik
+        - **Filter Bertahap**: Gunakan filter bertahap untuk mempersempit data sebelum visualisasi
+        """)
+    
+    st.markdown("### 📊 Format Data yang Didukung")
+    
+    with st.expander("📄 Spesifikasi File CSV"):
+        st.markdown("""
+        #### Kolom Wajib:
+        - `CITY` - Nama kota lokasi pemancar
+        - `CLNT_NAME` - Nama klien/pengguna frekuensi  
+        - `STN_NAME` - Nama stasiun/pemancar
+        - `SERVICE` - Kategori layanan (Broadcasting, Mobile, Satellite, dll)
+        - `SUBSERVICE` - Sub kategori layanan (FM Radio, 4G LTE, 5G, dll)
+        - `SID_LAT` - Koordinat latitude (lintang) dalam format desimal
+        - `SID_LONG` - Koordinat longitude (bujur) dalam format desimal
+        
+        #### Kolom Opsional:
+        - `FREQ_MHZ` - Frekuensi dalam MHz (untuk analisis spektrum)
+        - `BW_MHZ` - Bandwidth dalam MHz
+        - `DATE` - Tanggal registrasi/pembaruan data
+        - `TX_POWER` - Daya pancar dalam Watt
+        - `ANTENNA_HEIGHT` - Tinggi antena dalam meter
+        - `POLARIZATION` - Polarisasi antena (H/V/Circular)
+        
+        #### Contoh Data Valid:
+        ```csv
+        CITY,CLNT_NAME,STN_NAME,SERVICE,SUBSERVICE,SID_LAT,SID_LONG,FREQ_MHZ
+        Jakarta,PT Telkom,Jakarta Tower,Broadcasting,FM Radio,-6.2088,106.8456,98.5
+        Surabaya,PT XL,Surabaya BTS,Mobile,4G LTE,-7.2575,112.7520,1800.0
+        ```
+        """)
 
-# Add a footer with version info
+# Sample data generator for testing
+if st.sidebar.button("🧪 Generate Sample Data", help="Buat data contoh untuk testing"):
+    sample_data = {
+        'CITY': ['Jakarta', 'Surabaya', 'Bandung', 'Medan', 'Makassar'] * 20,
+        'CLNT_NAME': ['PT Telkom', 'PT XL', 'PT Indosat', 'PT Smartfren', 'PT Tri'] * 20,
+        'STN_NAME': [f'Station_{i}' for i in range(100)],
+        'SERVICE': ['Broadcasting', 'Mobile', 'Cellular', 'Satellite', 'Radio'] * 20,
+        'SUBSERVICE': ['FM Radio', '4G LTE', '5G', 'Satellite Internet', 'AM Radio'] * 20,
+        'SID_LAT': np.random.uniform(-10, 5, 100),
+        'SID_LONG': np.random.uniform(95, 140, 100),
+        'FREQ_MHZ': np.random.uniform(50, 3000, 100)
+    }
+    
+    sample_df = pd.DataFrame(sample_data)
+    st.session_state.data = sample_df
+    st.session_state.data_source = "Generated Sample Data"
+    st.session_state.upload_status = "success"
+    st.session_state.upload_message = "Sample data generated successfully!"
+    st.success("Sample data berhasil dibuat! Refresh halaman untuk melihat data.")
+
+# Add footer
+st.markdown("---")
 st.markdown("""
-<div style="text-align: center; margin-top: 3rem; padding: 1rem; color: #888;">
-    <p>Sistem Informasi Manajemen Frekuensi v2.2.0</p>
-    <p>© 2025 All Rights Reserved | Loka Monitor SFR Kendari</p>
+<div class="footer">
+    <p><strong>Sistem Informasi Manajemen Frekuensi v3.1</strong> © 2025</p>
+    <p>Dikembangkan dengan ❤️ untuk pengelolaan spektrum frekuensi yang lebih baik</p>
+    <p>✨ <strong>New v3.1:</strong> Enhanced City Filter | Multi-Criteria Filtering | Advanced Statistics | Export Filtered Data</p>
 </div>
 """, unsafe_allow_html=True)
